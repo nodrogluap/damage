@@ -1,0 +1,171 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+
+@ARGV == 2 or @ARGV == 3 or die "Usage: $0 <reference_genome.fasta> <damaged_reads.fastq> [damaged_pair_R2.fastq]\n";
+
+my $ref_fasta_file = shift @ARGV;
+my $reads1_fastq = shift @ARGV;
+my $reads2_fastq = @ARGV ? shift @ARGV : undef;
+
+my $indel_ignore_threshold = 0.05; # Don't count stats at positions with >= this proportion of insertions or deletions 
+my $verbose = 1;
+
+# Read in the sequence for context determination
+open(FASTA, $ref_fasta_file)
+	or die "Cannot open $ref_fasta_file for reading: $!\n";
+my %seq;
+my ($cur_id, $cur_seq);
+while(<FASTA>){
+	if(/^>(\S+)/){
+		if(defined $cur_id){
+			$seq{$cur_id} = $cur_seq;
+			$cur_seq = "";
+		}
+		$cur_id = $1;
+	}
+	else{
+		chomp;
+		$cur_seq .= $_;
+	}
+}
+close(FASTA);
+$seq{$cur_id} = $cur_seq if defined $cur_id;
+
+# As per https://gatk.broadinstitute.org/hc/en-us/articles/360035890571-OxoG-oxidative-artifacts: 
+# The [8-oxoG] variants (C→A)/(G→T) tend to occur in specific sequence contexts e.g. CCG→CAG (doi:10.1093/nar/gks1443).
+my %oxoG_sites; # format is {id:position => 1}
+# C -> T due to UV damage tends to occur in polypyramidine contexts
+my %uv_lesion_sites;
+for my $seqid (sort keys %seq){
+	my $seq = $seq{$seqid};
+	print "$seqid: ", length($seq), "bases\n" if $verbose;
+	my $cursor = 0;
+	while($seq =~ /CGG/ig){
+		$oxoG_sites{"$seqid:".(pos($seq)+2)} = 1;
+	}
+	# Reset the global regex
+	pos($seq) = 0;
+	while($seq =~ /[CTY](?=C[CTY])/ig){
+                $uv_lesion_sites{"$seqid:".(pos($seq)+2)} = 1;
+        }
+}
+print "Known damage site contexts in $ref_fasta_file: ", scalar(keys %oxoG_sites), " (8-oxoG), ", scalar(keys %uv_lesion_sites), " (UV lesion)\n" if $verbose; 
+#print join("\t", keys %uv_lesion_sites),"\n";
+
+# Run the alignments
+my $bam_file = $reads1_fastq;
+$bam_file =~ s/\.fastq(\.gz)?$/.bam/;
+# Output the BAM in the current directory
+$bam_file =~ s/^.+\///;
+system("minimap2 -x sr $ref_fasta_file -a $reads1_fastq".(defined $reads2_fastq ? " $reads2_fastq" : ""). 
+       " | samtools view -h -b -S - | samtools sort -o - \"\" > $bam_file") >> 8 
+	and die "Cannot run minimap2/samtools sort pipe: exit code was ", ($?>>8), "\n";
+system("samtools index $bam_file") >> 8
+        and die "Cannot run samtools index: exit code was ", ($?>>8), "\n";
+
+# Collect the alignment stats
+open(FLAGSTAT, "samtools flagstat $bam_file|")
+	or die "Cannot open read pipe for samtools: $!\n";
+# 254035 + 0 in total (QC-passed reads + QC-failed reads)
+my ($num_input_pass_reads) = <FLAGSTAT> =~ /^(\d+)/;
+# 0 + 0 duplicates
+<FLAGSTAT>;
+# 35758 + 0 mapped (14.08%:-nan%)
+my ($num_input_pass_mapped_reads) = <FLAGSTAT> =~ /^(\d+)/;
+close(FLAGSTAT);
+
+# See if there was any bias in the size of fragments produced by checking mapped pair insert size.
+my @insert_sizes;
+if(defined $reads2_fastq){
+	open(SAMTOOLS_VIEW, "samtools view -f66 $bam_file|") 
+		or die "Cannot run samtools view: $!\n";
+	while(<SAMTOOLS_VIEW>){
+		my @F = split /\t/, $_;
+		push @insert_sizes, abs($F[8]);
+	}
+	close(SAMTOOLS_VIEW);
+}
+@insert_sizes = sort {$a <=> $b} @insert_sizes;
+
+my (@oxoG_sites_observed, @non_oxoG_sites_observed);
+my (@uv_lesion_sites_observed, @non_uv_lesion_sites_observed);
+my ($num_Gs, $num_Cs); # Sites that are observed in the pileups, not total number number present in the reference
+open(MPILEUP, "samtools mpileup $bam_file |")
+	or die "Cannot run samtools mpileup: $!\n";
+while(<MPILEUP>){
+	my ($seqid, $pos, $n, $base_count, $bases) = split /\t/, $_;
+
+	# Clean up the bases data, and ignore positions that are mostly insertions or deletions in the pileup
+	$bases =~ s/\^\]//g;
+	my $num_insertions = 0;
+ 	while($bases =~ /\+(\d+)/){
+		$bases =~ s/\+$1.{$1}//;
+		$num_insertions++;
+	}
+	my $num_deletions = 0;
+ 	while($bases =~ /-(\d+)/){
+		$bases =~ s/-$1.{$1}//;
+		$num_deletions++;
+	}
+	next if $base_count == 0 or $num_insertions/$base_count >= $indel_ignore_threshold or $num_insertions/$base_count >= $indel_ignore_threshold;
+
+	# The following counts are always relative to the reference strand
+	my ($a_count) = $bases =~ tr/Aa/Aa/;
+	my ($c_count) = $bases =~ tr/Cc/Cc/;
+	my ($g_count) = $bases =~ tr/Gg/Gg/;
+	my ($t_count) = $bases =~ tr/Tt/Tt/;
+	if($c_count > $a_count and $c_count > $g_count and $c_count > $t_count){
+		$num_Cs++;
+	}
+	elsif($g_count > $a_count and $g_count > $c_count and $g_count > $t_count){
+		$num_Gs++;
+	}
+
+	if($c_count > $t_count){
+		if($a_count == 0 and $g_count == 0){
+			if(exists $uv_lesion_sites{"$seqid:$pos"}){
+				push @uv_lesion_sites_observed, $t_count/($t_count+$c_count);
+			}
+			else{
+				push @non_uv_lesion_sites_observed, $t_count/($t_count+$c_count);
+			}
+		}
+	}
+	elsif($g_count > $t_count){
+		if($a_count == 0 and $c_count == 0){
+			if(exists $oxoG_sites{"$seqid:$pos"}){
+				push @oxoG_sites_observed, $t_count/($t_count+$g_count);
+			}
+			else{
+				push @non_oxoG_sites_observed, $t_count/($t_count+$g_count);
+			}
+		}
+	}
+}
+close(MPILEUP);
+@oxoG_sites_observed = sort {$a <=> $b} @oxoG_sites_observed;
+@non_oxoG_sites_observed = sort {$a <=> $b} @non_oxoG_sites_observed;
+@uv_lesion_sites_observed = sort {$a <=> $b} @uv_lesion_sites_observed;
+@non_uv_lesion_sites_observed = sort {$a <=> $b} @non_uv_lesion_sites_observed;
+
+print "Observed majority C positions\t$num_Cs\n";
+print "Observed majority G positions\t$num_Gs\n";
+print "% reads mapping\t", 100*($num_input_pass_mapped_reads/$num_input_pass_reads), "\n";
+print "Median insert size for paired reads: ", $insert_sizes[int($#insert_sizes/2)], "\n" if defined $reads2_fastq;
+print "Median % G->T in oxoG contexts\t", 100*($oxoG_sites_observed[int($#oxoG_sites_observed/2)]), "\n";
+print "Mean % G->T in oxoG contexts\t", 100*(sum(@oxoG_sites_observed)/($#oxoG_sites_observed+1)), "\n";
+print "Median % G->T in non-oxoG contexts\t", 100*($non_oxoG_sites_observed[int($#non_oxoG_sites_observed/2)]), "\n";
+print "Mean % G->T in non-oxoG contexts\t", 100*(sum(@non_oxoG_sites_observed)/($num_Gs-scalar(keys %oxoG_sites))), "\n";
+print "Median % C->T in UV lesion contexts\t", 100*($uv_lesion_sites_observed[int($#uv_lesion_sites_observed/2)]), "\n";
+print "Mean % C->T in UV lesion contexts\t", 100*(sum(@uv_lesion_sites_observed)/($#uv_lesion_sites_observed+1)), "\n";
+print "Median % C->T in non-UV lesion contexts\t", 100*($non_uv_lesion_sites_observed[int($#uv_lesion_sites_observed/2)]), "\n";
+print "Mean % C->T in non-UV lesion contexts\t", 100*(sum(@non_uv_lesion_sites_observed)/($num_Cs-scalar(keys %uv_lesion_sites))), "\n";
+
+
+sub sum{
+	my $sum = 0;
+	$sum += pop(@_) while @_;
+	return $sum;
+}
