@@ -157,11 +157,11 @@ print "Median insert size for paired reads: ", $insert_sizes[int($#insert_sizes/
 print "Median % G->T in oxoG contexts\t", 100*($oxoG_sites_observed[int($#oxoG_sites_observed/2)]), "\n";
 print "Mean % G->T in oxoG contexts\t", 100*(sum(@oxoG_sites_observed)/($#oxoG_sites_observed+1)), "\n";
 print "Median % G->T in non-oxoG contexts\t", 100*($non_oxoG_sites_observed[int($#non_oxoG_sites_observed/2)]), "\n";
-print "Mean % G->T in non-oxoG contexts\t", 100*(sum(@non_oxoG_sites_observed)/($num_Gs-scalar(keys %oxoG_sites))), "\n";
+print "Mean % G->T in non-oxoG contexts\t", 100*(sum(@non_oxoG_sites_observed)/($#non_oxoG_sites_observed+1)), "\n";
 print "Median % C->T in UV lesion contexts\t", 100*($uv_lesion_sites_observed[int($#uv_lesion_sites_observed/2)]), "\n";
 print "Mean % C->T in UV lesion contexts\t", 100*(sum(@uv_lesion_sites_observed)/($#uv_lesion_sites_observed+1)), "\n";
 print "Median % C->T in non-UV lesion contexts\t", 100*($non_uv_lesion_sites_observed[int($#uv_lesion_sites_observed/2)]), "\n";
-print "Mean % C->T in non-UV lesion contexts\t", 100*(sum(@non_uv_lesion_sites_observed)/($num_Cs-scalar(keys %uv_lesion_sites))), "\n";
+print "Mean % C->T in non-UV lesion contexts\t", 100*(sum(@non_uv_lesion_sites_observed)/($#non_uv_lesion_sites_observed+1)), "\n";
 
 
 sub sum{
