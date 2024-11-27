@@ -9,6 +9,7 @@ Grab the code, install the dependencies using conda, download a sample Illumina 
 git clone https://github.com/nodrogluap/damage
 cd damage
 conda env create -f damage.yml
+conda activate damaga
 wget https://sra-pub-sars-cov2.s3.amazonaws.com/sra-src/SRR18026714/MHV-t0-1_S1_L001_R1_001.fastq.gz.1 -O test_r1.fastq.gz
 wget https://sra-pub-sars-cov2.s3.amazonaws.com/sra-src/SRR18026714/MHV-t0-1_S1_L001_R2_001.fastq.gz.1 -O test_r2.fastq.gz
 ./damage test/MHV-A59-B11.fasta test_r1.fastq.gz test_r2.fastq.gz > test_results.txt
